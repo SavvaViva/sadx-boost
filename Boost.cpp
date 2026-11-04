@@ -2,6 +2,7 @@
 // Сборка: Visual Studio, проект DLL Win32, подключить SADXModLoader.h (mod-loader-common / sadx-mod-loader).
 // ВНИМАНИЕ: код не компилировался и не тестировался в игре. Имена полей/функций сверь с вашей версией заголовков.
 
+#define NOMINMAX
 #include "SADXModLoader.h"
 #include <cmath>
 #include <algorithm>
