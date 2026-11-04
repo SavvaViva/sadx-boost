@@ -1,0 +1,47 @@
+name: Build SADX Boost mod
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout mod
+        uses: actions/checkout@v4
+
+      - name: Checkout SADX Mod Loader headers
+        uses: actions/checkout@v4
+        with:
+          repository: X-Hax/sadx-mod-loader
+          path: deps/sadx-mod-loader
+          submodules: recursive
+
+      - name: Setup MSVC (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Build Boost.dll
+        shell: cmd
+        run: |
+          set ML=deps\sadx-mod-loader
+          cl /nologo /LD /EHsc /O2 /std:c++17 /DWIN32_LEAN_AND_MEAN ^
+            /I"%ML%\SADXModLoader\include" ^
+            /I"%ML%\mod-loader-common\ModLoaderCommon" ^
+            /I"%ML%\libmodutils" ^
+            Boost.cpp /Fe:Boost.dll /link user32.lib
+
+      - name: Package
+        shell: cmd
+        run: |
+          mkdir SonicBoost
+          copy Boost.dll SonicBoost\
+          copy mod.ini SonicBoost\
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonicBoost
+          path: SonicBoost
