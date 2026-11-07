@@ -1,10 +1,13 @@
-// SADX Boost Mod (Sonic Generations style) v0.2 — SADX Mod Loader, C++ DLL (x86)
+// SADX Boost Mod (Sonic Generations style) v0.3 — SADX Mod Loader, C++ DLL (x86)
 // v0.2: блок спиндэша/шара на кнопке буста, камера с самокалибровкой, меньше заноса вправо.
+// v0.3: бег по воде (вода временно становится твёрдой), синие полосы скорости по краям экрана.
 
 #define NOMINMAX
 #include "SADXModLoader.h"
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <utility>
 
 // ---------- Настройки ----------
 static const int   BOOST_KEY          = 'A';       // клавиша клавиатуры
@@ -18,6 +21,7 @@ static const float DRAIN_PER_FRAME    = 0.45f;
 static const float BOOST_SPEED        = 9.0f;
 static const float BOOST_ACCEL        = 0.35f;
 static const float LATERAL_DAMP       = 0.80f;     // гасит боковой снос (Speed.z)
+static const bool  WATER_RUN          = true;      // бег по воде во время буста
 
 // Камера
 static const float CAM_DIST           = 26.0f;     // дистанция позади спины
@@ -159,6 +163,42 @@ static void UpdateHeading(EntityData1* p)
     g_hasPrev = true;
 }
 
+// ---------- Бег по воде ----------
+// Вода в уровне — это COL с флагом 0x2 (несолидный). Пока идёт буст, делаем такие COL твёрдыми,
+// после буста возвращаем исходные флаги.
+static LandTable* g_waterTable = nullptr;
+static std::vector<std::pair<int, int> > g_waterCols; // (индекс, исходные флаги)
+
+static void EnableWaterRun()
+{
+    if (g_waterTable) return;
+    LandTable* lt = CurrentLandTable;
+    if (!lt || !lt->COLList) return;
+
+    for (int i = 0; i < lt->COLCount; i++)
+    {
+        int flags = (int)lt->COLList[i].Flags;
+        if (flags & 0x2)
+        {
+            g_waterCols.push_back(std::make_pair(i, flags));
+            lt->COLList[i].Flags = (flags & ~0x2) | 0x1;
+        }
+    }
+    g_waterTable = lt;
+}
+
+static void DisableWaterRun()
+{
+    if (!g_waterTable) return;
+    if (g_waterTable == CurrentLandTable)
+    {
+        for (size_t k = 0; k < g_waterCols.size(); k++)
+            g_waterTable->COLList[g_waterCols[k].first].Flags = g_waterCols[k].second;
+    }
+    g_waterCols.clear();
+    g_waterTable = nullptr;
+}
+
 // ---------- Буст ----------
 static void StopBoost(EntityData1* data, CharObj2* co2)
 {
@@ -170,6 +210,7 @@ static void StopBoost(EntityData1* data, CharObj2* co2)
 
     if (!g_hadMagnet) co2->Powerups &= ~Powerups_MagneticBarrier;
     data->Status &= ~Status_Attack;
+    DisableWaterRun();
 }
 
 static void StartBoost(EntityData1* data, CharObj2* co2)
@@ -186,6 +227,8 @@ static void StartBoost(EntityData1* data, CharObj2* co2)
 
     g_hadMagnet = (co2->Powerups & Powerups_MagneticBarrier) != 0;
 
+    if (WATER_RUN) EnableWaterRun();
+
     // стартовое направление камеры = то, куда сейчас смотрит игровая камера
     if (Camera_Data1)
     {
@@ -194,6 +237,13 @@ static void StartBoost(EntityData1* data, CharObj2* co2)
         float n = sqrtf(vx * vx + vz * vz);
         if (n > 0.01f) { g_hx = vx / n; g_hz = vz / n; }
     }
+}
+
+static unsigned int g_rng = 12345u;
+static float Rand01()
+{
+    g_rng = g_rng * 1664525u + 1013904223u;
+    return (float)((g_rng >> 8) & 0xFFFF) / 65535.0f;
 }
 
 static void DrawHUD()
@@ -216,6 +266,18 @@ static void DrawHUD()
         float edge = sw * 0.12f;
         DrawRect_Queue(0, 0, edge, sh, 61000.0f, 0x502060FF, QueuedModelFlagsB_EnableZWrite);
         DrawRect_Queue(sw - edge, 0, sw, sh, 61000.0f, 0x502060FF, QueuedModelFlagsB_EnableZWrite);
+
+        // синие полосы скорости по краям
+        for (int i = 0; i < 10; i++)
+        {
+            float th = sh * 0.004f;
+            float yl = Rand01() * sh;
+            float ll = sw * (0.05f + Rand01() * 0.12f);
+            DrawRect_Queue(0, yl, ll, yl + th, 61500.0f, 0x7060D0FF, QueuedModelFlagsB_EnableZWrite);
+            float yr = Rand01() * sh;
+            float lr = sw * (0.05f + Rand01() * 0.12f);
+            DrawRect_Queue(sw - lr, yr, sw, yr + th, 61500.0f, 0x7060D0FF, QueuedModelFlagsB_EnableZWrite);
+        }
     }
 }
 
@@ -250,6 +312,7 @@ extern "C"
         if (!IsSonicInGame(data))
         {
             if (g_boosting) StopBoost(data, co2);
+            DisableWaterRun();
             return;
         }
 
