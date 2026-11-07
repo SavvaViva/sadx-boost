@@ -169,19 +169,40 @@ static void UpdateHeading(EntityData1* p)
 static LandTable* g_waterTable = nullptr;
 static std::vector<std::pair<int, int> > g_waterCols; // (индекс, исходные флаги)
 
+// Формат LandTable в памяти SADX (x86): +0 short COLCount, +0x0C указатель на список COL;
+// каждый COL занимает 0x24 байта, флаги поверхности лежат по смещению 0x20.
+// Работаем по смещениям, чтобы не зависеть от названий полей в заголовках.
+static inline int LandCOLCount(LandTable* lt)
+{
+    return (int)*(short*)lt;
+}
+
+static inline int* LandCOLFlags(LandTable* lt, int i)
+{
+    unsigned char* base = (unsigned char*)lt;
+    unsigned char* list = *(unsigned char**)(base + 0x0C);
+    if (!list) return nullptr;
+    return (int*)(list + i * 0x24 + 0x20);
+}
+
 static void EnableWaterRun()
 {
     if (g_waterTable) return;
     LandTable* lt = CurrentLandTable;
-    if (!lt || !lt->COLList) return;
+    if (!lt) return;
 
-    for (int i = 0; i < lt->COLCount; i++)
+    int count = LandCOLCount(lt);
+    if (count <= 0 || count > 20000) return;
+
+    for (int i = 0; i < count; i++)
     {
-        int flags = (int)lt->COLList[i].Flags;
+        int* fp = LandCOLFlags(lt, i);
+        if (!fp) break;
+        int flags = *fp;
         if (flags & 0x2)
         {
             g_waterCols.push_back(std::make_pair(i, flags));
-            lt->COLList[i].Flags = (flags & ~0x2) | 0x1;
+            *fp = (flags & ~0x2) | 0x1;
         }
     }
     g_waterTable = lt;
@@ -193,7 +214,10 @@ static void DisableWaterRun()
     if (g_waterTable == CurrentLandTable)
     {
         for (size_t k = 0; k < g_waterCols.size(); k++)
-            g_waterTable->COLList[g_waterCols[k].first].Flags = g_waterCols[k].second;
+        {
+            int* fp = LandCOLFlags(g_waterTable, g_waterCols[k].first);
+            if (fp) *fp = g_waterCols[k].second;
+        }
     }
     g_waterCols.clear();
     g_waterTable = nullptr;
