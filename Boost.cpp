@@ -1,6 +1,7 @@
-// SADX Boost Mod (Sonic Generations style) v0.3 — SADX Mod Loader, C++ DLL (x86)
+// SADX Boost Mod (Sonic Generations style) v0.4 — SADX Mod Loader, C++ DLL (x86)
 // v0.2: блок спиндэша/шара на кнопке буста, камера с самокалибровкой, меньше заноса вправо.
 // v0.3: бег по воде (вода временно становится твёрдой), синие полосы скорости по краям экрана.
+// v0.4: камера снова применяется в OnFrame, запасной бег по воде (прижимаем Соника к воде), журнал boost_log.txt.
 
 #define NOMINMAX
 #include "SADXModLoader.h"
@@ -8,6 +9,9 @@
 #include <algorithm>
 #include <vector>
 #include <utility>
+#include <string>
+#include <cstdio>
+#include <cstdarg>
 
 // ---------- Настройки ----------
 static const int   BOOST_KEY          = 'A';       // клавиша клавиатуры
@@ -52,6 +56,23 @@ static float g_pc[2] = { 0, 0 }, g_ps[2] = { 0, 0 };
 static const float PI_F = 3.14159265f;
 static inline float BamsToRad(int a) { return (float)(short)a * PI_F / 32768.0f; }
 static inline int   RadToBams(float r) { return (int)(r * 32768.0f / PI_F); }
+
+// ---------- Журнал для отладки ----------
+static std::string g_logPath;
+static int g_logTick = 0;
+
+static void Log(const char* fmt, ...)
+{
+    if (g_logPath.empty()) return;
+    FILE* f = nullptr;
+    if (fopen_s(&f, g_logPath.c_str(), "a") != 0 || !f) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(f, fmt, args);
+    va_end(args);
+    fputc('\n', f);
+    fclose(f);
+}
 
 static bool IsSonicInGame(EntityData1* data)
 {
@@ -206,6 +227,7 @@ static void EnableWaterRun()
         }
     }
     g_waterTable = lt;
+    Log("WaterRun enabled: COLCount=%d waterCOLs=%d", count, (int)g_waterCols.size());
 }
 
 static void DisableWaterRun()
@@ -223,11 +245,43 @@ static void DisableWaterRun()
     g_waterTable = nullptr;
 }
 
+// Запасной способ: ищем высоту поверхности воды под Соником и прижимаем его к ней
+static bool FindWaterSurface(EntityData1* p, float& outY)
+{
+    if (!g_waterTable) return false;
+    unsigned char* list = *(unsigned char**)((unsigned char*)g_waterTable + 0x0C);
+    if (!list) return false;
+
+    bool found = false;
+    float best = -1.0e9f;
+    for (size_t k = 0; k < g_waterCols.size(); k++)
+    {
+        unsigned char* col = list + g_waterCols[k].first * 0x24;
+        float* c = (float*)col;                 // Center xyz, радиус в c[3]
+        float dx = p->Position.x - c[0];
+        float dz = p->Position.z - c[2];
+        float r = c[3];
+        if (dx * dx + dz * dz > r * r) continue;
+
+        NJS_OBJECT* obj = *(NJS_OBJECT**)(col + 0x18);
+        if (!obj) continue;
+        float y = obj->pos[1];
+        if (y <= p->Position.y + 12.0f && y > p->Position.y - 80.0f && y > best)
+        {
+            best = y;
+            found = true;
+        }
+    }
+    outY = best;
+    return found;
+}
+
 // ---------- Буст ----------
 static void StopBoost(EntityData1* data, CharObj2* co2)
 {
     if (!g_boosting) return;
     g_boosting = false;
+    Log("StopBoost");
 
     if (g_physSaved) co2->PhysicsData = g_origPhys;
     g_physSaved = false;
@@ -240,6 +294,7 @@ static void StopBoost(EntityData1* data, CharObj2* co2)
 static void StartBoost(EntityData1* data, CharObj2* co2)
 {
     g_boosting = true;
+    Log("StartBoost");
 
     g_origPhys = co2->PhysicsData;
     g_physSaved = true;
@@ -311,6 +366,10 @@ extern "C"
 
     __declspec(dllexport) void __cdecl Init(const char* path, const HelperFunctions& helperFunctions)
     {
+        g_logPath = std::string(path) + "\\boost_log.txt";
+        FILE* f = nullptr;
+        if (fopen_s(&f, g_logPath.c_str(), "w") == 0 && f) fclose(f);   // очистить старый журнал
+        Log("Sonic Boost v0.4 loaded");
     }
 
     // читаем кнопку буста ДО того, как вырежем её действия из ввода
@@ -362,6 +421,32 @@ extern "C"
             data->Status &= ~Status_Ball;               // не сворачиваться в шар
             data->Status |= Status_Attack;              // сносит врагов
             co2->Powerups |= Powerups_MagneticBarrier;  // магнит колец
+
+            // бег по воде: прижимаем Соника к поверхности воды
+            float wy = 0.0f;
+            bool onWater = WATER_RUN && FindWaterSurface(data, wy) && data->Position.y < wy + 7.0f;
+            if (onWater)
+            {
+                data->Position.y = wy + 5.0f;
+                if (co2->Speed.y < 0.0f) co2->Speed.y = 0.0f;
+                data->Status |= Status_Ground;
+            }
+
+            // камера (применяем и здесь, и перед отрисовкой)
+            ApplyCamera(data);
+
+            if (++g_logTick % 30 == 1 && Camera_Data1)
+            {
+                Log("BOOST meter=%.1f spd=%.2f pos=(%.0f,%.0f,%.0f) cam=(%.0f,%.0f,%.0f) camRot=(%d,%d) waterCols=%d onWater=%d wy=%.1f",
+                    g_meter, co2->Speed.x, data->Position.x, data->Position.y, data->Position.z,
+                    Camera_Data1->Position.x, Camera_Data1->Position.y, Camera_Data1->Position.z,
+                    (int)Camera_Data1->Rotation.y, (int)Camera_Data1->Rotation.x,
+                    (int)g_waterCols.size(), onWater ? 1 : 0, wy);
+            }
+        }
+        else
+        {
+            CalibrateCamera(data);
         }
 
         DrawHUD();
